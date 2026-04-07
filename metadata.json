@@ -1,0 +1,7 @@
+{
+  "name": "AI Campus Assistant",
+  "description": "A comprehensive campus assistant featuring AI-powered Q&A, course scheduling, todo management, and OCR text extraction.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
