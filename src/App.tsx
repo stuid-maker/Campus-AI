@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   onAuthStateChanged, 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   GoogleAuthProvider, 
   signOut,
   User as FirebaseUser
@@ -86,6 +88,12 @@ export default function App() {
       }
       setLoading(false);
     });
+
+    // Handle redirect result
+    getRedirectResult(auth).catch((error) => {
+      console.error("Redirect login failed", error);
+    });
+
     return () => unsubscribe();
   }, []);
 
@@ -124,8 +132,14 @@ export default function App() {
   }, [user]);
 
   const handleLogin = async () => {
+    const provider = new GoogleAuthProvider();
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
+      // Use redirect for mobile devices, popup for desktop
+      if (/Android|iPhone|iPad/i.test(navigator.userAgent)) {
+        await signInWithRedirect(auth, provider);
+      } else {
+        await signInWithPopup(auth, provider);
+      }
     } catch (error) {
       console.error("Login failed", error);
     }
