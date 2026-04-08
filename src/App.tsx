@@ -48,7 +48,8 @@ import {
   ExternalLink,
   Sparkles,
   Settings,
-  ChevronLeft
+  ChevronLeft,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -1012,12 +1013,25 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
   useEffect(() => {
-    scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
+    scrollToBottom();
   }, [history, isTyping]);
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    // Show button if we are more than 200px away from bottom
+    setShowScrollButton(scrollHeight - scrollTop - clientHeight > 200);
+  };
 
   const handleSend = async () => {
     if (!input.trim() || isTyping) return;
@@ -1101,7 +1115,11 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto mb-4 pr-2 scroll-smooth">
+      <div 
+        ref={scrollRef} 
+        onScroll={handleScroll}
+        className="flex-1 space-y-4 overflow-y-auto mb-4 pr-2 scroll-smooth relative"
+      >
         {history.length === 0 && (
           <div className="text-center py-12">
             <div className="w-16 h-16 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600 mx-auto mb-4">
@@ -1131,7 +1149,22 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
             </div>
           </div>
         )}
+        <div ref={bottomRef} />
       </div>
+
+      <AnimatePresence>
+        {showScrollButton && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            onClick={scrollToBottom}
+            className="absolute bottom-24 right-8 w-10 h-10 bg-white border border-slate-200 rounded-full shadow-lg flex items-center justify-center text-slate-600 z-10 hover:bg-slate-50"
+          >
+            <ChevronDown className="w-5 h-5" />
+          </motion.button>
+        )}
+      </AnimatePresence>
 
       <div className="space-y-3">
         <div className="flex gap-2">
