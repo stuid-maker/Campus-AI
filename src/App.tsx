@@ -6,6 +6,8 @@ import {
   getRedirectResult,
   GoogleAuthProvider, 
   signOut,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
   User as FirebaseUser
 } from 'firebase/auth';
 import { 
@@ -58,6 +60,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [courses, setCourses] = useState<Course[]>([]);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -133,6 +138,31 @@ export default function App() {
     };
   }, [user]);
 
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      if (authMode === 'register') {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (error: any) {
+      console.error("Email auth failed", error);
+      let msg = "认证失败";
+      if (error.code === 'auth/user-not-found') msg = "用户不存在，请先注册";
+      else if (error.code === 'auth/wrong-password') msg = "密码错误";
+      else if (error.code === 'auth/email-already-in-use') msg = "该邮箱已被注册";
+      else if (error.code === 'auth/weak-password') msg = "密码太弱（至少6位）";
+      else if (error.code === 'auth/invalid-email') msg = "邮箱格式不正确";
+      setLoginError(msg);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   const handleLogin = async () => {
     setLoginLoading(true);
     setLoginError(null);
@@ -168,7 +198,20 @@ export default function App() {
   }
 
   if (!user || !userProfile) {
-    return <LoginView onLogin={handleLogin} loading={loginLoading} error={loginError} />;
+    return (
+      <LoginView 
+        onLogin={handleLogin} 
+        onEmailAuth={handleEmailAuth}
+        loading={loginLoading} 
+        error={loginError}
+        authMode={authMode}
+        setAuthMode={setAuthMode}
+        email={email}
+        setEmail={setEmail}
+        password={password}
+        setPassword={setPassword}
+      />
+    );
   }
 
   return (
@@ -383,7 +426,29 @@ function SettingsView({ userProfile }: { userProfile: UserProfile }) {
   );
 }
 
-function LoginView({ onLogin, loading, error }: { onLogin: () => void, loading: boolean, error: string | null }) {
+function LoginView({ 
+  onLogin, 
+  onEmailAuth,
+  loading, 
+  error,
+  authMode,
+  setAuthMode,
+  email,
+  setEmail,
+  password,
+  setPassword
+}: { 
+  onLogin: () => void, 
+  onEmailAuth: (e: React.FormEvent) => void,
+  loading: boolean, 
+  error: string | null,
+  authMode: 'login' | 'register',
+  setAuthMode: (mode: 'login' | 'register') => void,
+  email: string,
+  setEmail: (val: string) => void,
+  password: string,
+  setPassword: (val: string) => void
+}) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-8 text-center">
       <motion.div 
@@ -398,52 +463,61 @@ function LoginView({ onLogin, loading, error }: { onLogin: () => void, loading: 
         智能管理你的校园生活：课表、待办、AI问答，一站式解决。
       </p>
 
-      {window.location.hostname === 'localhost' && /Android|iPhone|iPad/i.test(navigator.userAgent) && (
-        <div className="mb-6 p-4 bg-amber-50 text-amber-700 rounded-2xl text-[11px] font-bold w-full max-w-xs text-left border border-amber-200">
-          <p className="mb-1">⚠️ 检测到环境配置问题</p>
-          <p className="font-medium opacity-90">
-            您当前在移动端使用 localhost 运行。这会导致 Google 登录无法跳回 App。
-            <br/><br/>
-            <strong>解决方法：</strong> 请确保您的 APK 指向以下 Shared URL：
-            <span className="block mt-1 p-2 bg-white/50 rounded select-all font-mono text-[9px]">
-              https://ais-pre-umszp7xbo5akgqtq4ti7yp-386323820145.asia-northeast1.run.app
-            </span>
-          </p>
+      <div className="w-full max-w-xs space-y-4">
+        <form onSubmit={onEmailAuth} className="space-y-3">
+          <input 
+            type="email"
+            placeholder="邮箱地址"
+            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            required
+          />
+          <input 
+            type="password"
+            placeholder="密码 (至少6位)"
+            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            required
+          />
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : (authMode === 'login' ? '立即登录' : '注册账号')}
+          </button>
+        </form>
+
+        <div className="flex items-center justify-between px-1">
+          <button 
+            onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+            className="text-xs text-blue-600 font-bold hover:underline"
+          >
+            {authMode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
+          </button>
         </div>
-      )}
+
+        <div className="relative py-4">
+          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
+          <div className="relative flex justify-center text-[10px] uppercase"><span className="bg-slate-50 px-2 text-slate-400 font-bold">或者</span></div>
+        </div>
+
+        <button 
+          onClick={onLogin}
+          disabled={loading}
+          className="w-full bg-white border border-slate-200 text-slate-700 px-6 py-3.5 rounded-xl font-semibold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50 text-sm"
+        >
+          <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+          Google 账号登录
+        </button>
+      </div>
 
       {error && (
-        <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold w-full max-w-xs text-left">
-          <p className="mb-2">❌ 登录报错: {error}</p>
-          <div className="p-2 bg-white/50 rounded-lg font-mono text-[10px] break-all">
-            当前域名: {window.location.hostname || '未知'}
-          </div>
-          <p className="mt-3 text-[10px] opacity-70 leading-relaxed">
-            提示：<br/>
-            1. 请确保在 **Safari/Chrome** 浏览器中打开（不要在微信内直接点开）。<br/>
-            2. 如果是 iPhone，请在设置中关闭“防止跨站跟踪”。<br/>
-            3. 尝试使用“无痕模式”之外的常规窗口。
-          </p>
+        <div className="mt-6 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold w-full max-w-xs text-left">
+          <p>❌ {error}</p>
         </div>
-      )}
-
-      <button 
-        onClick={onLogin}
-        disabled={loading}
-        className="w-full max-w-xs bg-white border border-slate-200 text-slate-700 px-6 py-4 rounded-2xl font-semibold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50"
-      >
-        {loading ? (
-          <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
-        ) : (
-          <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-        )}
-        {loading ? '正在跳转登录...' : '使用 Google 账号登录'}
-      </button>
-      
-      {loading && (
-        <p className="mt-4 text-[10px] text-slate-400 animate-pulse">
-          如果长时间没反应，请尝试刷新页面或更换浏览器
-        </p>
       )}
     </div>
   );
