@@ -56,6 +56,8 @@ export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -132,16 +134,21 @@ export default function App() {
   }, [user]);
 
   const handleLogin = async () => {
+    setLoginLoading(true);
+    setLoginError(null);
     const provider = new GoogleAuthProvider();
     try {
       // Use redirect for mobile devices, popup for desktop
       if (/Android|iPhone|iPad/i.test(navigator.userAgent)) {
+        console.log("Starting redirect login...");
         await signInWithRedirect(auth, provider);
       } else {
         await signInWithPopup(auth, provider);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Login failed", error);
+      setLoginError(error.message || "登录失败，请稍后重试");
+      setLoginLoading(false);
     }
   };
 
@@ -156,7 +163,7 @@ export default function App() {
   }
 
   if (!user || !userProfile) {
-    return <LoginView onLogin={handleLogin} />;
+    return <LoginView onLogin={handleLogin} loading={loginLoading} error={loginError} />;
   }
 
   return (
@@ -371,7 +378,7 @@ function SettingsView({ userProfile }: { userProfile: UserProfile }) {
   );
 }
 
-function LoginView({ onLogin }: { onLogin: () => void }) {
+function LoginView({ onLogin, loading, error }: { onLogin: () => void, loading: boolean, error: string | null }) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-8 text-center">
       <motion.div 
@@ -382,16 +389,35 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
         AI
       </motion.div>
       <h1 className="text-3xl font-bold text-slate-900 mb-4">AI 校园助手</h1>
-      <p className="text-slate-500 mb-12 max-w-xs">
+      <p className="text-slate-500 mb-8 max-w-xs">
         智能管理你的校园生活：课表、待办、AI问答，一站式解决。
       </p>
+
+      {error && (
+        <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold w-full max-w-xs">
+          {error}
+          <p className="mt-2 text-[10px] opacity-70">提示：请确保在手机自带浏览器（如 Safari/Chrome）中打开，并允许弹窗或跳转。</p>
+        </div>
+      )}
+
       <button 
         onClick={onLogin}
-        className="w-full max-w-xs bg-white border border-slate-200 text-slate-700 px-6 py-4 rounded-2xl font-semibold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm"
+        disabled={loading}
+        className="w-full max-w-xs bg-white border border-slate-200 text-slate-700 px-6 py-4 rounded-2xl font-semibold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50"
       >
-        <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-        使用 Google 账号登录
+        {loading ? (
+          <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+        ) : (
+          <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+        )}
+        {loading ? '正在跳转登录...' : '使用 Google 账号登录'}
       </button>
+      
+      {loading && (
+        <p className="mt-4 text-[10px] text-slate-400 animate-pulse">
+          如果长时间没反应，请尝试刷新页面或更换浏览器
+        </p>
+      )}
     </div>
   );
 }
