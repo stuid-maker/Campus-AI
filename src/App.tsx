@@ -138,16 +138,21 @@ export default function App() {
     setLoginError(null);
     const provider = new GoogleAuthProvider();
     try {
-      // Use redirect for mobile devices, popup for desktop
-      if (/Android|iPhone|iPad/i.test(navigator.userAgent)) {
-        console.log("Starting redirect login...");
-        await signInWithRedirect(auth, provider);
-      } else {
-        await signInWithPopup(auth, provider);
-      }
+      // For APK/WebView environments, Popup is often more reliable than Redirect
+      // because Redirect tries to navigate back to 'localhost' which fails in external browsers.
+      console.log("Starting popup login...");
+      await signInWithPopup(auth, provider);
     } catch (error: any) {
       console.error("Login failed", error);
-      setLoginError(error.message || "登录失败，请稍后重试");
+      
+      // If popup fails, try redirect as a last resort
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
+        setLoginError("弹窗被拦截，请允许弹窗或尝试在浏览器中打开。");
+      } else if (error.code === 'auth/unauthorized-domain') {
+        setLoginError("域名未授权。请确保已在 Firebase 控制台添加 'localhost' 到授权网域。");
+      } else {
+        setLoginError(error.message || "登录失败");
+      }
       setLoginLoading(false);
     }
   };
@@ -393,10 +398,32 @@ function LoginView({ onLogin, loading, error }: { onLogin: () => void, loading: 
         智能管理你的校园生活：课表、待办、AI问答，一站式解决。
       </p>
 
+      {window.location.hostname === 'localhost' && /Android|iPhone|iPad/i.test(navigator.userAgent) && (
+        <div className="mb-6 p-4 bg-amber-50 text-amber-700 rounded-2xl text-[11px] font-bold w-full max-w-xs text-left border border-amber-200">
+          <p className="mb-1">⚠️ 检测到环境配置问题</p>
+          <p className="font-medium opacity-90">
+            您当前在移动端使用 localhost 运行。这会导致 Google 登录无法跳回 App。
+            <br/><br/>
+            <strong>解决方法：</strong> 请确保您的 APK 指向以下 Shared URL：
+            <span className="block mt-1 p-2 bg-white/50 rounded select-all font-mono text-[9px]">
+              https://ais-pre-umszp7xbo5akgqtq4ti7yp-386323820145.asia-northeast1.run.app
+            </span>
+          </p>
+        </div>
+      )}
+
       {error && (
-        <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold w-full max-w-xs">
-          {error}
-          <p className="mt-2 text-[10px] opacity-70">提示：请确保在手机自带浏览器（如 Safari/Chrome）中打开，并允许弹窗或跳转。</p>
+        <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold w-full max-w-xs text-left">
+          <p className="mb-2">❌ 登录报错: {error}</p>
+          <div className="p-2 bg-white/50 rounded-lg font-mono text-[10px] break-all">
+            当前域名: {window.location.hostname || '未知'}
+          </div>
+          <p className="mt-3 text-[10px] opacity-70 leading-relaxed">
+            提示：<br/>
+            1. 请确保在 **Safari/Chrome** 浏览器中打开（不要在微信内直接点开）。<br/>
+            2. 如果是 iPhone，请在设置中关闭“防止跨站跟踪”。<br/>
+            3. 尝试使用“无痕模式”之外的常规窗口。
+          </p>
         </div>
       )}
 
