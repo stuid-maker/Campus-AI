@@ -1,6 +1,6 @@
 {
   "name": "AI Campus Assistant",
-  "description": "A comprehensive campus assistant featuring AI-powered Q&A, course scheduling, todo management, and OCR text extraction.",
+  "description": "A local-first, privacy-focused campus assistant featuring customizable AI integration, local database storage, course scheduling, and todo management.",
   "requestFramePermissions": [
     "camera"
   ]

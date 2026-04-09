@@ -1,34 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
-  signInWithRedirect,
-  getRedirectResult,
-  GoogleAuthProvider, 
-  signOut,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  fetchSignInMethodsForEmail,
-  User as FirebaseUser
-} from 'firebase/auth';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  orderBy,
-  setDoc,
-  getDoc,
-  getDocs,
-  serverTimestamp
-} from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
-import { Course, Todo, ChatMessage, UserProfile } from './types';
-import { askGemini, extractTextFromImage, parseScheduleFromText } from './gemini';
+import { db, type LocalUser, type LocalCourse, type LocalTodo, type LocalChatMessage } from './db';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { askAI } from './services/aiService';
+import { extractTextFromImage, parseScheduleFromText } from './gemini';
 import { cn, getDayName } from './utils';
 import { 
   Calendar, 
@@ -52,189 +26,93 @@ import {
   Settings,
   ChevronLeft,
   ChevronDown,
-  RotateCcw
+  RotateCcw,
+  Globe,
+  Key,
+  Cpu
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { differenceInWeeks, startOfWeek, parseISO, format } from 'date-fns';
 
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [currentUser, setCurrentUser] = useState<LocalUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [suggestGoogle, setSuggestGoogle] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [todos, setTodos] = useState<Todo[]>([]);
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [activeTab, setActiveTab] = useState<'schedule' | 'todo' | 'chat' | 'settings'>('schedule');
+
+  // Sync Data from Local DB
+  const courses = useLiveQuery(() => db.courses.where('userId').equals(currentUser?.id || -1).toArray(), [currentUser]);
+  const todos = useLiveQuery(() => db.todos.where('userId').equals(currentUser?.id || -1).toArray(), [currentUser]);
+  const chatHistory = useLiveQuery(async () => {
+    const history = await db.chatHistory.where('userId').equals(currentUser?.id || -1).toArray();
+    return history.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  }, [currentUser]);
   
-  // Auth listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      if (u) {
-        // Ensure user doc exists
-        const userRef = doc(db, 'users', u.uid);
-        const userSnap = await getDoc(userRef);
-        if (!userSnap.exists()) {
-          const newProfile: UserProfile = {
-            uid: u.uid,
-            email: u.email || '',
-            displayName: u.displayName || '',
-            photoURL: u.photoURL || '',
-            createdAt: new Date().toISOString(),
-            semesterStartDate: format(startOfWeek(new Date(), { weekStartsOn: 1 }), 'yyyy-MM-dd')
-          };
-          await setDoc(userRef, newProfile);
-          setUserProfile(newProfile);
-        } else {
-          setUserProfile(userSnap.data() as UserProfile);
-        }
-      } else {
-        setUserProfile(null);
+    const checkSession = async () => {
+      const savedUserId = localStorage.getItem('campus_user_id');
+      if (savedUserId) {
+        const user = await db.users.get(Number(savedUserId));
+        if (user) setCurrentUser(user);
       }
       setLoading(false);
-    });
-
-    // Handle redirect result
-    getRedirectResult(auth).catch((error) => {
-      console.error("Redirect login failed", error);
-    });
-
-    return () => unsubscribe();
+    };
+    checkSession();
   }, []);
 
-  // Data listeners
-  useEffect(() => {
-    if (!user) return;
-
-    const userRef = doc(db, 'users', user.uid);
-    const unsubscribeProfile = onSnapshot(userRef, (snapshot) => {
-      if (snapshot.exists()) {
-        setUserProfile(snapshot.data() as UserProfile);
-      }
-    });
-
-    const coursesQuery = query(collection(db, 'users', user.uid, 'courses'), orderBy('dayOfWeek'), orderBy('startTime'));
-    const unsubscribeCourses = onSnapshot(coursesQuery, (snapshot) => {
-      setCourses(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Course)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/courses`));
-
-    const todosQuery = query(collection(db, 'users', user.uid, 'todos'), orderBy('createdAt', 'desc'));
-    const unsubscribeTodos = onSnapshot(todosQuery, (snapshot) => {
-      setTodos(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Todo)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/todos`));
-
-    const chatQuery = query(collection(db, 'users', user.uid, 'chatHistory'), orderBy('timestamp', 'asc'));
-    const unsubscribeChat = onSnapshot(chatQuery, (snapshot) => {
-      setChatHistory(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatMessage)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/chatHistory`));
-
-    return () => {
-      unsubscribeProfile();
-      unsubscribeCourses();
-      unsubscribeTodos();
-      unsubscribeChat();
-    };
-  }, [user]);
-
-  const handleEmailAuth = async (e: React.FormEvent) => {
+  const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) return;
+    if (!username || !password) return;
     setLoginLoading(true);
     setLoginError(null);
-    setSuggestGoogle(false);
-    
-    // Smart check for Gmail
-    if (email.toLowerCase().endsWith('@gmail.com') && authMode === 'register') {
-      setSuggestGoogle(true);
-      setLoginError("检测到 Gmail 邮箱，建议直接使用 Google 账号登录以获得更好体验。");
-      setLoginLoading(false);
-      return;
-    }
 
     try {
       if (authMode === 'register') {
-        await createUserWithEmailAndPassword(auth, email, password);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
-      localStorage.setItem('lastAuthMethod', 'email');
-    } catch (error: any) {
-      console.error("Email auth failed", error);
-      let msg = "认证失败";
-      
-      // Handle existing Google account
-      if (error.code === 'auth/email-already-in-use' || error.code === 'auth/account-exists-with-different-credential') {
-        try {
-          const methods = await fetchSignInMethodsForEmail(auth, email);
-          if (methods.includes('google.com')) {
-            setSuggestGoogle(true);
-            msg = "该邮箱已关联 Google 账号，请直接使用 Google 登录。";
-          } else {
-            msg = "该邮箱已注册，已为您切换到登录模式";
-            setAuthMode('login');
-          }
-        } catch (e) {
-          // If fetch methods is blocked by security rules, fallback to general suggestion
-          msg = "该邮箱已注册，如果您之前使用过 Google 登录，请尝试 Google 按钮。";
-          setAuthMode('login');
+        const existing = await db.users.get({ username });
+        if (existing) throw new Error("用户名已存在");
+        
+        const id = await db.users.add({
+          username,
+          passwordHash: password,
+          aiName: '小智',
+          aiPersonality: '温柔体贴的校园助手',
+          aiProvider: 'gemini',
+          aiApiKey: '',
+          aiApiUrl: '',
+          aiModel: 'gemini-1.5-flash',
+          semesterStartDate: format(startOfWeek(new Date(), { weekStartsOn: 1 }), 'yyyy-MM-dd')
+        });
+        const newUser = await db.users.get(id);
+        if (newUser) {
+          setCurrentUser(newUser);
+          localStorage.setItem('campus_user_id', String(id));
         }
+      } else {
+        const user = await db.users.get({ username, passwordHash: password });
+        if (!user) throw new Error("用户名或密码错误");
+        setCurrentUser(user);
+        localStorage.setItem('campus_user_id', String(user.id));
       }
-      else if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
-        msg = "邮箱或密码错误，请检查后重试";
-      }
-      else if (error.code === 'auth/weak-password') msg = "密码太弱（至少6位）";
-      else if (error.code === 'auth/invalid-email') msg = "邮箱格式不正确";
-      setLoginError(msg);
+    } catch (err: any) {
+      setLoginError(err.message);
     } finally {
       setLoginLoading(false);
     }
   };
 
-  const handleLogin = async () => {
-    setLoginLoading(true);
-    setLoginError(null);
-    const provider = new GoogleAuthProvider();
-    try {
-      // For APK/WebView environments, Popup is often more reliable than Redirect
-      // because Redirect tries to navigate back to 'localhost' which fails in external browsers.
-      console.log("Starting popup login...");
-      await signInWithPopup(auth, provider);
-      localStorage.setItem('lastAuthMethod', 'google');
-    } catch (error: any) {
-      console.error("Login failed", error);
-      
-      // If popup fails, try redirect as a last resort
-      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
-        setLoginError("弹窗被拦截，请允许弹窗或尝试在浏览器中打开。");
-      } else if (error.code === 'auth/unauthorized-domain') {
-        setLoginError("域名未授权。请确保已在 Firebase 控制台添加 'localhost' 到授权网域。");
-      } else {
-        setLoginError(error.message || "登录失败");
-      }
-      setLoginLoading(false);
-    }
+  const handleLogout = () => {
+    setCurrentUser(null);
+    localStorage.removeItem('campus_user_id');
   };
 
-  const handleLogout = () => signOut(auth);
-
   const handleNewChat = async () => {
-    if (!user) return;
-    try {
-      const chatRef = collection(db, 'users', user.uid, 'chatHistory');
-      const q = query(chatRef);
-      const snapshot = await getDocs(q);
-      const deletePromises = snapshot.docs.map(d => deleteDoc(doc(db, 'users', user.uid, 'chatHistory', d.id)));
-      await Promise.all(deletePromises);
-    } catch (err) {
-      console.error("Failed to clear chat history", err);
-    }
+    if (!currentUser?.id) return;
+    await db.chatHistory.where('userId').equals(currentUser.id).delete();
   };
 
   if (loading) {
@@ -245,21 +123,18 @@ export default function App() {
     );
   }
 
-  if (!user || !userProfile) {
+  if (!currentUser) {
     return (
       <LoginView 
-        onLogin={handleLogin} 
-        onEmailAuth={handleEmailAuth}
-        loading={loginLoading} 
-        error={loginError || ''}
         authMode={authMode}
         setAuthMode={setAuthMode}
-        suggestGoogle={suggestGoogle}
-        setSuggestGoogle={setSuggestGoogle}
-        email={email}
-        setEmail={setEmail}
+        username={username}
+        setUsername={setUsername}
         password={password}
         setPassword={setPassword}
+        onAuth={handleAuth}
+        loading={loginLoading}
+        error={loginError}
       />
     );
   }
@@ -273,14 +148,14 @@ export default function App() {
             onClick={() => setActiveTab('settings')}
             className="w-9 h-9 bg-gradient-to-tr from-blue-600 to-indigo-500 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-200 cursor-pointer overflow-hidden"
           >
-            {userProfile.photoURL ? (
-              <img src={userProfile.photoURL} alt="AI Avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+            {currentUser.photoURL ? (
+              <img src={currentUser.photoURL} alt="Avatar" className="w-full h-full object-cover" />
             ) : (
               <Sparkles className="w-5 h-5" />
             )}
           </div>
           <div>
-            <h1 className="text-lg font-bold text-slate-900 leading-none">{userProfile.aiName || 'AI 校园助手'}</h1>
+            <h1 className="text-lg font-bold text-slate-900 leading-none">{currentUser.aiName || 'AI 校园助手'}</h1>
             <p className="text-[10px] text-slate-400 font-medium mt-1 uppercase tracking-wider">BIT Campus Assistant</p>
           </div>
         </div>
@@ -305,22 +180,22 @@ export default function App() {
         <AnimatePresence mode="wait">
           {activeTab === 'schedule' && (
             <div className="h-full overflow-y-auto p-5 pb-28">
-              <ScheduleView key="schedule" courses={courses} userProfile={userProfile} />
+              <ScheduleView key="schedule" courses={courses || []} userProfile={currentUser} />
             </div>
           )}
           {activeTab === 'todo' && (
             <div className="h-full overflow-y-auto p-5 pb-28">
-              <TodoView key="todo" todos={todos} userId={user.uid} />
+              <TodoView key="todo" todos={todos || []} userId={currentUser.id!} />
             </div>
           )}
           {activeTab === 'chat' && (
             <div className="h-full p-5 pb-28">
-              <ChatView key="chat" history={chatHistory} userId={user.uid} userProfile={userProfile} />
+              <ChatView key="chat" history={chatHistory || []} userId={currentUser.id!} userProfile={currentUser} />
             </div>
           )}
           {activeTab === 'settings' && (
             <div className="h-full overflow-y-auto p-5 pb-28">
-              <SettingsView key="settings" userProfile={userProfile} />
+              <SettingsView key="settings" userProfile={currentUser} onUpdate={setCurrentUser} />
             </div>
           )}
         </AnimatePresence>
@@ -344,7 +219,7 @@ export default function App() {
           active={activeTab === 'chat'} 
           onClick={() => setActiveTab('chat')} 
           icon={<MessageSquare className="w-6 h-6" />} 
-          label={userProfile.aiName || "AI助手"} 
+          label={currentUser.aiName || "AI助手"} 
         />
         <NavButton 
           active={activeTab === 'settings'} 
@@ -358,24 +233,37 @@ export default function App() {
 }
 
 // --- Settings View ---
-function SettingsView({ userProfile }: { userProfile: UserProfile }) {
+function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpdate: (user: LocalUser) => void }) {
   const [startDate, setStartDate] = useState(userProfile.semesterStartDate || format(new Date(), 'yyyy-MM-dd'));
   const [aiName, setAiName] = useState(userProfile.aiName || 'AI 校园助手');
   const [aiPersonality, setAiPersonality] = useState(userProfile.aiPersonality || '亲切、准确且有条理');
   const [aiAvatar, setAiAvatar] = useState(userProfile.photoURL || '');
+  const [aiProvider, setAiProvider] = useState(userProfile.aiProvider || 'gemini');
+  const [aiApiKey, setAiApiKey] = useState(userProfile.aiApiKey || '');
+  const [aiApiUrl, setAiApiUrl] = useState(userProfile.aiApiUrl || '');
+  const [aiModel, setAiModel] = useState(userProfile.aiModel || 'gemini-1.5-flash');
+  
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSave = async () => {
+    if (!userProfile.id) return;
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'users', userProfile.uid), {
+      const updatedUser: LocalUser = {
+        ...userProfile,
         semesterStartDate: startDate,
-        aiName: aiName,
-        aiPersonality: aiPersonality,
-        photoURL: aiAvatar
-      });
+        aiName,
+        aiPersonality,
+        photoURL: aiAvatar,
+        aiProvider,
+        aiApiKey,
+        aiApiUrl,
+        aiModel
+      };
+      await db.users.update(userProfile.id, updatedUser);
+      onUpdate(updatedUser);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -425,7 +313,7 @@ function SettingsView({ userProfile }: { userProfile: UserProfile }) {
               className="relative w-20 h-20 rounded-2xl bg-slate-50 flex items-center justify-center cursor-pointer overflow-hidden border-2 border-dashed border-slate-200 hover:border-blue-400 transition-colors"
             >
               {aiAvatar ? (
-                <img src={aiAvatar} alt="AI Avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                <img src={aiAvatar} alt="AI Avatar" className="w-full h-full object-cover" />
               ) : (
                 <Camera className="w-6 h-6 text-slate-400" />
               )}
@@ -470,6 +358,67 @@ function SettingsView({ userProfile }: { userProfile: UserProfile }) {
           </div>
         </section>
 
+        {/* AI API Configuration */}
+        <section className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 space-y-4">
+          <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">AI 接口配置 (免 VPN 关键)</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={() => setAiProvider('gemini')}
+              className={`flex items-center justify-center gap-2 py-3 rounded-xl border font-bold text-xs transition-all ${aiProvider === 'gemini' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-500 border-slate-100'}`}
+            >
+              <Sparkles className="w-4 h-4" /> Gemini
+            </button>
+            <button 
+              onClick={() => setAiProvider('custom')}
+              className={`flex items-center justify-center gap-2 py-3 rounded-xl border font-bold text-xs transition-all ${aiProvider === 'custom' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-500 border-slate-100'}`}
+            >
+              <Globe className="w-4 h-4" /> 自定义/国内
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-2 flex items-center gap-1">
+                <Key className="w-3 h-3" /> API Key
+              </label>
+              <input 
+                type="password"
+                placeholder="输入您的 API Key" 
+                className="w-full px-4 py-3 bg-slate-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 outline-none font-mono text-xs"
+                value={aiApiKey}
+                onChange={e => setAiApiKey(e.target.value)}
+              />
+            </div>
+            {aiProvider === 'custom' && (
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-2 flex items-center gap-1">
+                  <ExternalLink className="w-3 h-3" /> API 地址 (Endpoint)
+                </label>
+                <input 
+                  placeholder="例如：https://api.deepseek.com/v1/chat/completions" 
+                  className="w-full px-4 py-3 bg-slate-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 outline-none text-xs"
+                  value={aiApiUrl}
+                  onChange={e => setAiApiUrl(e.target.value)}
+                />
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-2 flex items-center gap-1">
+                <Cpu className="w-3 h-3" /> 模型名称 (Model)
+              </label>
+              <input 
+                placeholder="例如：deepseek-chat 或 gemini-1.5-flash" 
+                className="w-full px-4 py-3 bg-slate-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 outline-none text-xs"
+                value={aiModel}
+                onChange={e => setAiModel(e.target.value)}
+              />
+            </div>
+          </div>
+          <p className="text-[10px] text-slate-400 leading-relaxed">
+            提示：如果您在国内，建议使用自定义提供商并填入国内大模型（如 DeepSeek、通义千问）的 API 信息。
+          </p>
+        </section>
+
         {/* Semester Section */}
         <section className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
           <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4">学期设置</h3>
@@ -496,34 +445,26 @@ function SettingsView({ userProfile }: { userProfile: UserProfile }) {
 }
 
 function LoginView({ 
-  onLogin, 
-  onEmailAuth,
-  loading, 
-  error,
   authMode,
   setAuthMode,
-  suggestGoogle,
-  setSuggestGoogle,
-  email,
-  setEmail,
+  username,
+  setUsername,
   password,
-  setPassword
+  setPassword,
+  onAuth,
+  loading, 
+  error
 }: { 
-  onLogin: () => void, 
-  onEmailAuth: (e: React.FormEvent) => void,
-  loading: boolean, 
-  error: string | null,
   authMode: 'login' | 'register',
   setAuthMode: (mode: 'login' | 'register') => void,
-  suggestGoogle: boolean,
-  setSuggestGoogle: (val: boolean) => void,
-  email: string,
-  setEmail: (val: string) => void,
+  username: string,
+  setUsername: (val: string) => void,
   password: string,
-  setPassword: (val: string) => void
+  setPassword: (val: string) => void,
+  onAuth: (e: React.FormEvent) => void,
+  loading: boolean, 
+  error: string | null
 }) {
-  const lastMethod = localStorage.getItem('lastAuthMethod');
-
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-8 text-center">
       <motion.div 
@@ -539,89 +480,65 @@ function LoginView({
       </p>
 
       <div className="w-full max-w-xs space-y-4">
-        {!suggestGoogle && (
-          <form onSubmit={onEmailAuth} className="space-y-3">
+        <form onSubmit={onAuth} className="space-y-3">
+          <div className="relative">
+            <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input 
-              type="email"
-              placeholder="邮箱地址"
-              className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
+              type="text"
+              placeholder="用户名"
+              className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm font-medium"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
               required
             />
+          </div>
+          <div className="relative">
+            <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input 
               type="password"
-              placeholder="密码 (至少6位)"
-              className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
+              placeholder="密码"
+              className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm font-medium"
               value={password}
               onChange={e => setPassword(e.target.value)}
               required
             />
-            <button 
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50"
-            >
-              {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : (authMode === 'login' ? '立即登录' : '注册账号')}
-            </button>
-          </form>
-        )}
-
-        {!suggestGoogle && (
-          <div className="flex items-center justify-between px-1">
-            <button 
-              onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-              className="text-xs text-blue-600 font-bold hover:underline"
-            >
-              {authMode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
-            </button>
           </div>
-        )}
+          
+          {error && (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="mt-2 p-3 rounded-xl text-xs font-bold bg-red-50 text-red-600 border border-red-100 text-left"
+            >
+              <p className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse" />
+                {error}
+              </p>
+            </motion.div>
+          )}
 
-        <div className="relative py-4">
-          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
-          <div className="relative flex justify-center text-[10px] uppercase"><span className="bg-slate-50 px-2 text-slate-400 font-bold">或者</span></div>
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2 mt-4"
+          >
+            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : (authMode === 'login' ? '立即登录' : '注册账号')}
+          </button>
+        </form>
+
+        <div className="flex items-center justify-center px-1">
+          <button 
+            onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+            className="text-xs text-blue-600 font-bold hover:underline"
+          >
+            {authMode === 'login' ? '没有账号？点击注册' : '已有账号？点击登录'}
+          </button>
         </div>
 
-        <button 
-          onClick={onLogin}
-          disabled={loading}
-          className={cn(
-            "w-full px-6 py-3.5 rounded-xl font-semibold flex items-center justify-center gap-3 transition-all shadow-sm disabled:opacity-50 text-sm border",
-            (suggestGoogle || lastMethod === 'google') 
-              ? "bg-blue-600 text-white border-blue-600 shadow-blue-100 scale-[1.02]" 
-              : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
-          )}
-        >
-          <img src="https://www.google.com/favicon.ico" className={cn("w-5 h-5", (suggestGoogle || lastMethod === 'google') && "brightness-0 invert")} alt="Google" />
-          {suggestGoogle ? '点击使用 Google 登录' : 'Google 账号登录'}
-        </button>
-
-        {suggestGoogle && (
-          <button 
-            onClick={() => setSuggestGoogle(false)}
-            className="text-xs text-slate-400 font-medium hover:underline"
-          >
-            返回邮箱登录
-          </button>
-        )}
+        <p className="text-[10px] text-slate-400 mt-8">
+          数据将安全存储在您的设备本地，无需 VPN 即可使用
+        </p>
       </div>
-
-      {error && (
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className={cn(
-            "mt-6 p-4 rounded-2xl text-xs font-bold w-full max-w-xs text-left border",
-            suggestGoogle ? "bg-blue-50 text-blue-700 border-blue-100" : "bg-red-50 text-red-600 border-red-100"
-          )}
-        >
-          <p className="flex items-center gap-2">
-            <span className={cn("w-1.5 h-1.5 rounded-full animate-pulse", suggestGoogle ? "bg-blue-600" : "bg-red-600")} />
-            {error}
-          </p>
-        </motion.div>
-      )}
     </div>
   );
 }
@@ -642,7 +559,7 @@ function NavButton({ active, onClick, icon, label }: { active: boolean, onClick:
 }
 
 // --- Schedule View ---
-function ScheduleView({ courses, userProfile }: { courses: Course[], userProfile: UserProfile }) {
+function ScheduleView({ courses, userProfile }: { courses: LocalCourse[], userProfile: LocalUser }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   
@@ -653,7 +570,6 @@ function ScheduleView({ courses, userProfile }: { courses: Course[], userProfile
     try {
       const start = startOfWeek(parseISO(startDateStr), { weekStartsOn: 1 });
       const now = new Date();
-      // Use differenceInCalendarWeeks for more accurate week counting in academic contexts
       const diff = differenceInWeeks(now, start);
       return Math.max(1, diff + 1);
     } catch (e) {
@@ -663,17 +579,12 @@ function ScheduleView({ courses, userProfile }: { courses: Course[], userProfile
 
   const currentWeek = userProfile.semesterStartDate ? getWeekNumber(userProfile.semesterStartDate) : 1;
 
-  // Filter courses by current week
-  // CRITICAL: Ensure we only show courses that are active this week
   const filteredCourses = courses.filter(c => {
-    if (!c.weeks || c.weeks.length === 0) return true; // Show if no week info
+    if (!c.weeks || c.weeks.length === 0) return true;
     return c.weeks.includes(currentWeek);
   });
   
   const todayCourses = filteredCourses.filter(c => c.dayOfWeek === today);
-  
-  // All courses for this week (sorted by day and time)
-  const otherCourses = filteredCourses.filter(c => c.dayOfWeek !== today);
 
   return (
     <motion.div 
@@ -712,7 +623,7 @@ function ScheduleView({ courses, userProfile }: { courses: Course[], userProfile
       <div className="space-y-4">
         {todayCourses.length > 0 ? (
           todayCourses.map(course => (
-            <CourseCard key={course.id} course={course} userId={userProfile.uid} />
+            <CourseCard key={course.id} course={course} />
           ))
         ) : (
           <div className="bento-card p-10 text-center border-dashed border-slate-200">
@@ -745,13 +656,7 @@ function ScheduleView({ courses, userProfile }: { courses: Course[], userProfile
                   </div>
                 </div>
                 <button 
-                  onClick={async () => {
-                    try {
-                      await deleteDoc(doc(db, 'users', userProfile.uid, 'courses', course.id));
-                    } catch (e) {
-                      handleFirestoreError(e, OperationType.DELETE, `users/${userProfile.uid}/courses/${course.id}`);
-                    }
-                  }}
+                  onClick={() => db.courses.delete(course.id!)}
                   className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -762,29 +667,23 @@ function ScheduleView({ courses, userProfile }: { courses: Course[], userProfile
         </div>
       )}
 
-      {showAdd && <AddCourseModal onClose={() => setShowAdd(false)} userId={userProfile.uid} />}
-      {showImport && <ImportScheduleModal onClose={() => setShowImport(false)} userId={userProfile.uid} />}
+      {showAdd && <AddCourseModal onClose={() => setShowAdd(false)} userId={userProfile.id!} />}
+      {showImport && <ImportScheduleModal onClose={() => setShowImport(false)} userId={userProfile.id!} />}
     </motion.div>
   );
 }
 
-function CourseCard({ course, userId }: { course: Course, userId: string }) {
+function CourseCard({ course }: { course: LocalCourse }) {
   const weeksDisplay = () => {
     if (!course.weeks || course.weeks.length === 0) return '全周';
-    
-    // Helper to format week ranges (e.g., 1-2, 4-16)
     const ranges: string[] = [];
     let start = course.weeks[0];
     let prev = course.weeks[0];
-    
     for (let i = 1; i <= course.weeks.length; i++) {
       const curr = course.weeks[i];
       if (curr !== prev + 1 || i === course.weeks.length) {
-        if (start === prev) {
-          ranges.push(`${start}`);
-        } else {
-          ranges.push(`${start}-${prev}`);
-        }
+        if (start === prev) ranges.push(`${start}`);
+        else ranges.push(`${start}-${prev}`);
         start = curr;
       }
       prev = curr;
@@ -814,13 +713,7 @@ function CourseCard({ course, userId }: { course: Course, userId: string }) {
         </div>
       </div>
       <button 
-        onClick={async () => {
-          try {
-            await deleteDoc(doc(db, 'users', userId, 'courses', course.id));
-          } catch (e) {
-            handleFirestoreError(e, OperationType.DELETE, `users/${userId}/courses/${course.id}`);
-          }
-        }}
+        onClick={() => db.courses.delete(course.id!)}
         className="absolute top-2 right-2 p-2 text-slate-300 hover:text-red-500 transition-all"
       >
         <Trash2 className="w-4 h-4" />
@@ -829,7 +722,7 @@ function CourseCard({ course, userId }: { course: Course, userId: string }) {
   );
 }
 
-function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId: string }) {
+function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId: number }) {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
   const [overwrite, setOverwrite] = useState(false);
@@ -842,20 +735,11 @@ function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId:
     try {
       const parsedCourses = await parseScheduleFromText(text);
       if (Array.isArray(parsedCourses)) {
-        // If overwrite is checked, delete all existing courses first
         if (overwrite) {
-          const coursesRef = collection(db, 'users', userId, 'courses');
-          // We need to get the docs to delete them
-          // Note: In a real app we might use a write batch or a cloud function
-          // but for this scale, individual deletes are fine for a prototype
-          const { getDocs } = await import('firebase/firestore');
-          const snapshot = await getDocs(coursesRef);
-          const deletePromises = snapshot.docs.map(doc => deleteDoc(doc.ref));
-          await Promise.all(deletePromises);
+          await db.courses.where('userId').equals(userId).delete();
         }
-
         for (const course of parsedCourses) {
-          await addDoc(collection(db, 'users', userId, 'courses'), {
+          await db.courses.add({
             ...course,
             userId,
             color: course.color || `#${Math.floor(Math.random()*16777215).toString(16)}`
@@ -883,21 +767,18 @@ function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId:
           <h3 className="text-xl font-black text-slate-900">教务系统导入</h3>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><X className="w-6 h-6" /></button>
         </div>
-        
         <div className="space-y-4">
           <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100">
             <p className="text-xs text-blue-700 leading-relaxed font-medium">
-              请登录 <a href="https://jwms.bit.edu.cn" target="_blank" rel="noreferrer" className="underline font-bold inline-flex items-center gap-0.5">BIT教务系统 <ExternalLink className="w-3 h-3" /></a>，进入“我的课表”，全选并复制页面内容，然后粘贴到下方。
+              请登录 BIT教务系统，进入“我的课表”，全选并复制页面内容，然后粘贴到下方。
             </p>
           </div>
-          
           <textarea 
             placeholder="在此粘贴课程表文本内容..." 
             className="w-full h-48 px-4 py-3 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-blue-500 outline-none text-sm resize-none"
             value={text}
             onChange={e => setText(e.target.value)}
           />
-
           <label className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
             <input 
               type="checkbox" 
@@ -907,7 +788,6 @@ function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId:
             />
             <span className="text-sm font-bold text-slate-700">覆盖原有课表 (导入前清空旧数据)</span>
           </label>
-          
           {status && (
             <div className={cn(
               "p-3 rounded-xl text-xs font-bold text-center",
@@ -916,7 +796,6 @@ function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId:
               {status.msg}
             </div>
           )}
-
           <button 
             onClick={handleImport}
             disabled={loading || !text.trim()}
@@ -931,7 +810,7 @@ function ImportScheduleModal({ onClose, userId }: { onClose: () => void, userId:
   );
 }
 
-function AddCourseModal({ onClose, userId }: { onClose: () => void, userId: string }) {
+function AddCourseModal({ onClose, userId }: { onClose: () => void, userId: number }) {
   const [name, setName] = useState('');
   const [location, setLocation] = useState('');
   const [day, setDay] = useState(1);
@@ -942,35 +821,27 @@ function AddCourseModal({ onClose, userId }: { onClose: () => void, userId: stri
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Parse weeks string (e.g., "1-8, 10, 12-16")
     const weeks: number[] = [];
     weeksStr.split(',').forEach(part => {
       const range = part.trim().split('-');
       if (range.length === 2) {
-        for (let i = parseInt(range[0]); i <= parseInt(range[1]); i++) {
-          weeks.push(i);
-        }
+        for (let i = parseInt(range[0]); i <= parseInt(range[1]); i++) weeks.push(i);
       } else if (range.length === 1 && range[0]) {
         weeks.push(parseInt(range[0]));
       }
     });
 
-    try {
-      await addDoc(collection(db, 'users', userId, 'courses'), {
-        userId,
-        name,
-        location,
-        dayOfWeek: Number(day),
-        startTime: start,
-        endTime: end,
-        weeks: weeks.length > 0 ? weeks : Array.from({length: 16}, (_, i) => i + 1),
-        color
-      });
-      onClose();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `users/${userId}/courses`);
-    }
+    await db.courses.add({
+      userId,
+      name,
+      location,
+      dayOfWeek: Number(day),
+      startTime: start,
+      endTime: end,
+      weeks: weeks.length > 0 ? weeks : Array.from({length: 16}, (_, i) => i + 1),
+      color
+    });
+    onClose();
   };
 
   return (
@@ -1026,41 +897,29 @@ function AddCourseModal({ onClose, userId }: { onClose: () => void, userId: stri
 }
 
 // --- Todo View ---
-function TodoView({ todos, userId }: { todos: Todo[], userId: string }) {
+function TodoView({ todos, userId }: { todos: LocalTodo[], userId: number }) {
   const [newTodo, setNewTodo] = useState('');
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTodo.trim()) return;
-    try {
-      await addDoc(collection(db, 'users', userId, 'todos'), {
-        userId,
-        title: newTodo,
-        completed: false,
-        createdAt: new Date().toISOString()
-      });
-      setNewTodo('');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `users/${userId}/todos`);
-    }
+    await db.todos.add({
+      userId,
+      title: newTodo,
+      completed: false,
+      createdAt: new Date().toISOString()
+    });
+    setNewTodo('');
   };
 
-  const toggleTodo = async (todo: Todo) => {
-    try {
-      await updateDoc(doc(db, 'users', userId, 'todos', todo.id), {
-        completed: !todo.completed
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${userId}/todos/${todo.id}`);
-    }
+  const toggleTodo = async (todo: LocalTodo) => {
+    await db.todos.update(todo.id!, {
+      completed: !todo.completed
+    });
   };
 
-  const deleteTodo = async (id: string) => {
-    try {
-      await deleteDoc(doc(db, 'users', userId, 'todos', id));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `users/${userId}/todos/${id}`);
-    }
+  const deleteTodo = async (id: number) => {
+    await db.todos.delete(id);
   };
 
   return (
@@ -1098,7 +957,7 @@ function TodoView({ todos, userId }: { todos: Todo[], userId: string }) {
               {todo.title}
             </span>
             <button 
-              onClick={() => deleteTodo(todo.id)}
+              onClick={() => deleteTodo(todo.id!)}
               className="p-2 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
             >
               <Trash2 className="w-4 h-4" />
@@ -1111,7 +970,7 @@ function TodoView({ todos, userId }: { todos: Todo[], userId: string }) {
 }
 
 // --- Chat View ---
-function ChatView({ history, userId, userProfile }: { history: ChatMessage[], userId: string, userProfile: UserProfile }) {
+function ChatView({ history, userId, userProfile }: { history: LocalChatMessage[], userId: number, userProfile: LocalUser }) {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
@@ -1131,7 +990,6 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
   const handleScroll = () => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    // Show button if we are more than 200px away from bottom
     setShowScrollButton(scrollHeight - scrollTop - clientHeight > 200);
   };
 
@@ -1144,23 +1002,34 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
 
     try {
       // Save user message
-      await addDoc(collection(db, 'users', userId, 'chatHistory'), {
+      await db.chatHistory.add({
         userId,
         role: 'user',
         content: userMsg,
         timestamp: new Date().toISOString()
       });
 
-      // Get AI response
-      const geminiHistory = history.map(m => ({
+      // Prepare history for AI
+      const aiHistory = history.map(m => ({
         role: m.role,
-        parts: [{ text: m.content }]
+        content: m.content
       }));
       
-      const response = await askGemini(userMsg, geminiHistory, userProfile.aiName, userProfile.aiPersonality);
+      const response = await askAI(
+        userMsg, 
+        aiHistory, 
+        {
+          provider: userProfile.aiProvider as any || 'gemini',
+          apiKey: userProfile.aiApiKey || '',
+          apiUrl: userProfile.aiApiUrl || '',
+          model: userProfile.aiModel || '',
+          aiName: userProfile.aiName || 'AI助手',
+          aiPersonality: userProfile.aiPersonality || ''
+        }
+      );
 
       // Save AI message
-      await addDoc(collection(db, 'users', userId, 'chatHistory'), {
+      await db.chatHistory.add({
         userId,
         role: 'model',
         content: response,
@@ -1182,7 +1051,8 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
     reader.onloadend = async () => {
       const base64 = reader.result as string;
       try {
-        const extractedText = await extractTextFromImage(base64, userProfile.aiName, userProfile.aiPersonality);
+        // Fallback to gemini for OCR if no custom config, or we can implement custom OCR
+        const extractedText = await extractTextFromImage(base64, userProfile.aiName || 'AI助手', userProfile.aiPersonality || '');
         setInput(prev => prev + (prev ? '\n' : '') + extractedText);
       } catch (err) {
         console.error(err);
@@ -1210,20 +1080,18 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
             <div className="w-16 h-16 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600 mx-auto mb-4">
               <MessageSquare className="w-8 h-8" />
             </div>
-            <p className="text-slate-500">有什么我可以帮你的吗？<br/>你可以问我课程安排或学习问题。</p>
+            <p className="text-slate-500 font-medium">有什么我可以帮你的吗？<br/>你可以问我课程安排或学习问题。</p>
           </div>
         )}
         {history.map(msg => (
           <div key={msg.id} className={cn("flex", msg.role === 'user' ? "justify-end" : "justify-start")}>
             <div className={cn(
-              "max-w-[85%] p-4 rounded-2xl text-sm",
+              "max-w-[85%] p-4 rounded-2xl text-sm font-medium",
               msg.role === 'user' ? "bg-blue-600 text-white rounded-tr-none" : "bg-white border text-slate-700 rounded-tl-none"
             )}>
-            <div className="prose prose-sm max-w-none prose-slate">
-              <ReactMarkdown>
-                {msg.content}
-              </ReactMarkdown>
-            </div>
+              <div className="prose prose-sm max-w-none prose-slate dark:prose-invert">
+                <ReactMarkdown>{msg.content}</ReactMarkdown>
+              </div>
             </div>
           </div>
         ))}
@@ -1270,7 +1138,7 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
           <div className="flex-1 relative">
             <textarea 
               placeholder="输入你的问题..." 
-              className="w-full px-6 py-4 bg-white rounded-2xl border border-slate-100 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none pr-14 resize-none max-h-32"
+              className="w-full px-6 py-4 bg-white rounded-2xl border border-slate-100 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none pr-14 resize-none max-h-32 font-medium"
               rows={1}
               value={input}
               onChange={e => setInput(e.target.value)}
