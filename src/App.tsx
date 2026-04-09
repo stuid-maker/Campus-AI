@@ -241,7 +241,7 @@ function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpd
   const [aiProvider, setAiProvider] = useState(userProfile.aiProvider || 'gemini');
   const [aiApiKey, setAiApiKey] = useState(userProfile.aiApiKey || '');
   const [aiApiUrl, setAiApiUrl] = useState(userProfile.aiApiUrl || '');
-  const [aiModel, setAiModel] = useState(userProfile.aiModel || 'gemini-1.5-flash');
+  const [aiModel, setAiModel] = useState(userProfile.aiModel || 'gemini-3-flash-preview');
   
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -283,6 +283,15 @@ function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpd
     reader.readAsDataURL(file);
   };
 
+  const handleProviderChange = (provider: 'gemini' | 'custom') => {
+    setAiProvider(provider);
+    if (provider === 'gemini') {
+      setAiModel('gemini-3-flash-preview');
+    } else {
+      setAiModel('');
+    }
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
@@ -303,7 +312,7 @@ function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpd
         )}
       </div>
 
-      <div className="space-y-6">
+      <div className="space-y-6 pb-20">
         {/* AI Avatar Section */}
         <section className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
           <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4">AI 形象设置</h3>
@@ -363,13 +372,13 @@ function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpd
           <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">AI 接口配置 (免 VPN 关键)</h3>
           <div className="grid grid-cols-2 gap-3">
             <button 
-              onClick={() => setAiProvider('gemini')}
+              onClick={() => handleProviderChange('gemini')}
               className={`flex items-center justify-center gap-2 py-3 rounded-xl border font-bold text-xs transition-all ${aiProvider === 'gemini' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-500 border-slate-100'}`}
             >
               <Sparkles className="w-4 h-4" /> Gemini
             </button>
             <button 
-              onClick={() => setAiProvider('custom')}
+              onClick={() => handleProviderChange('custom')}
               className={`flex items-center justify-center gap-2 py-3 rounded-xl border font-bold text-xs transition-all ${aiProvider === 'custom' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-500 border-slate-100'}`}
             >
               <Globe className="w-4 h-4" /> 自定义/国内
@@ -383,11 +392,14 @@ function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpd
               </label>
               <input 
                 type="password"
-                placeholder="输入您的 API Key" 
+                placeholder={aiProvider === 'gemini' ? "留空则使用系统默认模型" : "输入您的 API Key"} 
                 className="w-full px-4 py-3 bg-slate-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 outline-none font-mono text-xs"
                 value={aiApiKey}
                 onChange={e => setAiApiKey(e.target.value)}
               />
+              {aiProvider === 'gemini' && !aiApiKey && (
+                <p className="text-[10px] text-blue-500 mt-1 font-bold">✨ 已启用系统默认 Gemini 模型，无需填写 Key。</p>
+              )}
             </div>
             {aiProvider === 'custom' && (
               <div>
@@ -407,7 +419,7 @@ function SettingsView({ userProfile, onUpdate }: { userProfile: LocalUser, onUpd
                 <Cpu className="w-3 h-3" /> 模型名称 (Model)
               </label>
               <input 
-                placeholder="例如：deepseek-chat 或 gemini-1.5-flash" 
+                placeholder="例如：deepseek-chat 或 gemini-3-flash-preview" 
                 className="w-full px-4 py-3 bg-slate-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 outline-none text-xs"
                 value={aiModel}
                 onChange={e => setAiModel(e.target.value)}
