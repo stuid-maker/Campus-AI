@@ -8,6 +8,7 @@ import {
   signOut,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  fetchSignInMethodsForEmail,
   User as FirebaseUser
 } from 'firebase/auth';
 import { 
@@ -22,6 +23,7 @@ import {
   orderBy,
   setDoc,
   getDoc,
+  getDocs,
   serverTimestamp
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
@@ -49,7 +51,8 @@ import {
   Sparkles,
   Settings,
   ChevronLeft,
-  ChevronDown
+  ChevronDown,
+  RotateCcw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -61,6 +64,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [suggestGoogle, setSuggestGoogle] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -144,18 +148,47 @@ export default function App() {
     if (!email || !password) return;
     setLoginLoading(true);
     setLoginError(null);
+    setSuggestGoogle(false);
+    
+    // Smart check for Gmail
+    if (email.toLowerCase().endsWith('@gmail.com') && authMode === 'register') {
+      setSuggestGoogle(true);
+      setLoginError("检测到 Gmail 邮箱，建议直接使用 Google 账号登录以获得更好体验。");
+      setLoginLoading(false);
+      return;
+    }
+
     try {
       if (authMode === 'register') {
         await createUserWithEmailAndPassword(auth, email, password);
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
+      localStorage.setItem('lastAuthMethod', 'email');
     } catch (error: any) {
       console.error("Email auth failed", error);
       let msg = "认证失败";
-      if (error.code === 'auth/user-not-found') msg = "用户不存在，请先注册";
-      else if (error.code === 'auth/wrong-password') msg = "密码错误";
-      else if (error.code === 'auth/email-already-in-use') msg = "该邮箱已被注册";
+      
+      // Handle existing Google account
+      if (error.code === 'auth/email-already-in-use' || error.code === 'auth/account-exists-with-different-credential') {
+        try {
+          const methods = await fetchSignInMethodsForEmail(auth, email);
+          if (methods.includes('google.com')) {
+            setSuggestGoogle(true);
+            msg = "该邮箱已关联 Google 账号，请直接使用 Google 登录。";
+          } else {
+            msg = "该邮箱已注册，已为您切换到登录模式";
+            setAuthMode('login');
+          }
+        } catch (e) {
+          // If fetch methods is blocked by security rules, fallback to general suggestion
+          msg = "该邮箱已注册，如果您之前使用过 Google 登录，请尝试 Google 按钮。";
+          setAuthMode('login');
+        }
+      }
+      else if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
+        msg = "邮箱或密码错误，请检查后重试";
+      }
       else if (error.code === 'auth/weak-password') msg = "密码太弱（至少6位）";
       else if (error.code === 'auth/invalid-email') msg = "邮箱格式不正确";
       setLoginError(msg);
@@ -173,6 +206,7 @@ export default function App() {
       // because Redirect tries to navigate back to 'localhost' which fails in external browsers.
       console.log("Starting popup login...");
       await signInWithPopup(auth, provider);
+      localStorage.setItem('lastAuthMethod', 'google');
     } catch (error: any) {
       console.error("Login failed", error);
       
@@ -190,6 +224,19 @@ export default function App() {
 
   const handleLogout = () => signOut(auth);
 
+  const handleNewChat = async () => {
+    if (!user) return;
+    try {
+      const chatRef = collection(db, 'users', user.uid, 'chatHistory');
+      const q = query(chatRef);
+      const snapshot = await getDocs(q);
+      const deletePromises = snapshot.docs.map(d => deleteDoc(doc(db, 'users', user.uid, 'chatHistory', d.id)));
+      await Promise.all(deletePromises);
+    } catch (err) {
+      console.error("Failed to clear chat history", err);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -204,9 +251,11 @@ export default function App() {
         onLogin={handleLogin} 
         onEmailAuth={handleEmailAuth}
         loading={loginLoading} 
-        error={loginError}
+        error={loginError || ''}
         authMode={authMode}
         setAuthMode={setAuthMode}
+        suggestGoogle={suggestGoogle}
+        setSuggestGoogle={setSuggestGoogle}
         email={email}
         setEmail={setEmail}
         password={password}
@@ -216,9 +265,9 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col max-w-md mx-auto shadow-2xl relative overflow-hidden ring-1 ring-slate-200">
+    <div className="h-screen bg-slate-50 flex flex-col max-w-md mx-auto shadow-2xl relative overflow-hidden ring-1 ring-slate-200">
       {/* Header */}
-      <header className="bg-white/80 backdrop-blur-md px-6 py-4 border-b flex items-center justify-between sticky top-0 z-20">
+      <header className="bg-white/90 backdrop-blur-md px-6 py-4 border-b flex items-center justify-between sticky top-0 z-30 shadow-sm shrink-0">
         <div className="flex items-center gap-3">
           <div 
             onClick={() => setActiveTab('settings')}
@@ -232,28 +281,47 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-lg font-bold text-slate-900 leading-none">{userProfile.aiName || 'AI 校园助手'}</h1>
-            <p className="text-[10px] text-slate-400 font-medium mt-1">BIT CAMPUS ASSISTANT</p>
+            <p className="text-[10px] text-slate-400 font-medium mt-1 uppercase tracking-wider">BIT Campus Assistant</p>
           </div>
         </div>
-        <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-all">
-          <LogOut className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-1">
+          {activeTab === 'chat' && (
+            <button 
+              onClick={handleNewChat}
+              className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-all"
+              title="新对话"
+            >
+              <RotateCcw className="w-5 h-5" />
+            </button>
+          )}
+          <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-all">
+            <LogOut className="w-5 h-5" />
+          </button>
+        </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto p-5 pb-28">
+      <main className="flex-1 overflow-hidden relative">
         <AnimatePresence mode="wait">
           {activeTab === 'schedule' && (
-            <ScheduleView key="schedule" courses={courses} userProfile={userProfile} />
+            <div className="h-full overflow-y-auto p-5 pb-28">
+              <ScheduleView key="schedule" courses={courses} userProfile={userProfile} />
+            </div>
           )}
           {activeTab === 'todo' && (
-            <TodoView key="todo" todos={todos} userId={user.uid} />
+            <div className="h-full overflow-y-auto p-5 pb-28">
+              <TodoView key="todo" todos={todos} userId={user.uid} />
+            </div>
           )}
           {activeTab === 'chat' && (
-            <ChatView key="chat" history={chatHistory} userId={user.uid} userProfile={userProfile} />
+            <div className="h-full p-5 pb-28">
+              <ChatView key="chat" history={chatHistory} userId={user.uid} userProfile={userProfile} />
+            </div>
           )}
           {activeTab === 'settings' && (
-            <SettingsView key="settings" userProfile={userProfile} />
+            <div className="h-full overflow-y-auto p-5 pb-28">
+              <SettingsView key="settings" userProfile={userProfile} />
+            </div>
           )}
         </AnimatePresence>
       </main>
@@ -434,6 +502,8 @@ function LoginView({
   error,
   authMode,
   setAuthMode,
+  suggestGoogle,
+  setSuggestGoogle,
   email,
   setEmail,
   password,
@@ -445,11 +515,15 @@ function LoginView({
   error: string | null,
   authMode: 'login' | 'register',
   setAuthMode: (mode: 'login' | 'register') => void,
+  suggestGoogle: boolean,
+  setSuggestGoogle: (val: boolean) => void,
   email: string,
   setEmail: (val: string) => void,
   password: string,
   setPassword: (val: string) => void
 }) {
+  const lastMethod = localStorage.getItem('lastAuthMethod');
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-8 text-center">
       <motion.div 
@@ -465,40 +539,44 @@ function LoginView({
       </p>
 
       <div className="w-full max-w-xs space-y-4">
-        <form onSubmit={onEmailAuth} className="space-y-3">
-          <input 
-            type="email"
-            placeholder="邮箱地址"
-            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-            required
-          />
-          <input 
-            type="password"
-            placeholder="密码 (至少6位)"
-            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            required
-          />
-          <button 
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50"
-          >
-            {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : (authMode === 'login' ? '立即登录' : '注册账号')}
-          </button>
-        </form>
+        {!suggestGoogle && (
+          <form onSubmit={onEmailAuth} className="space-y-3">
+            <input 
+              type="email"
+              placeholder="邮箱地址"
+              className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+            />
+            <input 
+              type="password"
+              placeholder="密码 (至少6位)"
+              className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+            />
+            <button 
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : (authMode === 'login' ? '立即登录' : '注册账号')}
+            </button>
+          </form>
+        )}
 
-        <div className="flex items-center justify-between px-1">
-          <button 
-            onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-            className="text-xs text-blue-600 font-bold hover:underline"
-          >
-            {authMode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
-          </button>
-        </div>
+        {!suggestGoogle && (
+          <div className="flex items-center justify-between px-1">
+            <button 
+              onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+              className="text-xs text-blue-600 font-bold hover:underline"
+            >
+              {authMode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
+            </button>
+          </div>
+        )}
 
         <div className="relative py-4">
           <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
@@ -508,17 +586,41 @@ function LoginView({
         <button 
           onClick={onLogin}
           disabled={loading}
-          className="w-full bg-white border border-slate-200 text-slate-700 px-6 py-3.5 rounded-xl font-semibold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50 text-sm"
+          className={cn(
+            "w-full px-6 py-3.5 rounded-xl font-semibold flex items-center justify-center gap-3 transition-all shadow-sm disabled:opacity-50 text-sm border",
+            (suggestGoogle || lastMethod === 'google') 
+              ? "bg-blue-600 text-white border-blue-600 shadow-blue-100 scale-[1.02]" 
+              : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+          )}
         >
-          <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-          Google 账号登录
+          <img src="https://www.google.com/favicon.ico" className={cn("w-5 h-5", (suggestGoogle || lastMethod === 'google') && "brightness-0 invert")} alt="Google" />
+          {suggestGoogle ? '点击使用 Google 登录' : 'Google 账号登录'}
         </button>
+
+        {suggestGoogle && (
+          <button 
+            onClick={() => setSuggestGoogle(false)}
+            className="text-xs text-slate-400 font-medium hover:underline"
+          >
+            返回邮箱登录
+          </button>
+        )}
       </div>
 
       {error && (
-        <div className="mt-6 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold w-full max-w-xs text-left">
-          <p>❌ {error}</p>
-        </div>
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className={cn(
+            "mt-6 p-4 rounded-2xl text-xs font-bold w-full max-w-xs text-left border",
+            suggestGoogle ? "bg-blue-50 text-blue-700 border-blue-100" : "bg-red-50 text-red-600 border-red-100"
+          )}
+        >
+          <p className="flex items-center gap-2">
+            <span className={cn("w-1.5 h-1.5 rounded-full animate-pulse", suggestGoogle ? "bg-blue-600" : "bg-red-600")} />
+            {error}
+          </p>
+        </motion.div>
       )}
     </div>
   );
@@ -1098,23 +1200,6 @@ function ChatView({ history, userId, userProfile }: { history: ChatMessage[], us
       exit={{ opacity: 0, x: 20 }}
       className="h-full flex flex-col"
     >
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold text-slate-900">{userProfile.aiName || 'AI 助手'}</h2>
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-blue-100 flex items-center justify-center text-blue-600 shrink-0 overflow-hidden">
-            {userProfile.photoURL ? (
-              <img src={userProfile.photoURL} alt="AI Avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-            ) : (
-              <Sparkles className="w-5 h-5" />
-            )}
-          </div>
-          <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-xs font-bold">
-            <div className="w-1.5 h-1.5 bg-blue-600 rounded-full animate-pulse" />
-            Gemini 3.0 Flash
-          </div>
-        </div>
-      </div>
-
       <div 
         ref={scrollRef} 
         onScroll={handleScroll}
