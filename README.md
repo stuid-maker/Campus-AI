@@ -18,3 +18,8 @@ View your app in AI Studio: https://ai.studio/apps/d7fc08eb-a3f6-4719-b49d-9b9c1
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Native Android (VPN-free MVP)
+
+A native Android implementation is available under `android/`.
+See `android/README.md` for setup and architecture.
